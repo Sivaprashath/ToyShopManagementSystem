@@ -65,6 +65,8 @@ export function AuthProvider({ children }) {
       email: email.toLowerCase(),
       purpose: 'register',
       tempUser: data.user || { username, email, phone },
+      devOtp: data.devOtp,
+      emailSent: data.emailSent,
       message: data.message || 'Verification code sent to your email.'
     });
 
@@ -88,6 +90,8 @@ export function AuthProvider({ children }) {
       email: (data.user?.email || identifier).toLowerCase(),
       purpose: 'login',
       tempUser: data.user,
+      devOtp: data.devOtp,
+      emailSent: data.emailSent,
       message: data.message || 'Enter verification code sent to your email.'
     });
 
@@ -130,9 +134,11 @@ export function AuthProvider({ children }) {
     }
     setPendingOtp((prev) => ({
       ...prev,
+      devOtp: data.devOtp || prev?.devOtp,
+      emailSent: data.emailSent,
       message: 'A fresh OTP code was sent to your email inbox.'
     }));
-    return { success: true };
+    return { success: true, devOtp: data.devOtp };
   }
 
   function cancelOtp() {

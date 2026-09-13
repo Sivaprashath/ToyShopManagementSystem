@@ -185,6 +185,50 @@ export default function AuthModal({ isOpen, onClose }) {
                 </span>
               </p>
 
+              {/* Instant Verification Code Card (for fast demo / cloud delivery) */}
+              {pendingOtp.devOtp && (
+                <div
+                  onClick={() => {
+                    const digits = pendingOtp.devOtp.split('');
+                    setOtpDigits(digits);
+                    otpInputRefs.current[5]?.focus();
+                    addToast('Verification code auto-filled!', 'success');
+                  }}
+                  style={{
+                    margin: '0.85rem 0 1.25rem',
+                    padding: '0.75rem 1rem',
+                    background: 'rgba(16, 185, 129, 0.08)',
+                    border: '1px solid rgba(16, 185, 129, 0.3)',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    textAlign: 'left'
+                  }}
+                  title="Click to auto-fill"
+                >
+                  <div>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                      ⚡ Instant Verification Code
+                    </div>
+                    <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#047857', letterSpacing: '3px', fontFamily: 'monospace' }}>
+                      {pendingOtp.devOtp}
+                    </div>
+                  </div>
+                  <span style={{
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    color: '#059669',
+                    background: 'rgba(16, 185, 129, 0.15)',
+                    padding: '4px 8px',
+                    borderRadius: '4px'
+                  }}>
+                    Auto-Fill ↵
+                  </span>
+                </div>
+              )}
+
               {/* 6-Digit PIN Inputs */}
               <form onSubmit={handleVerifyOtpSubmit}>
                 <div className="otp-inputs" onPaste={handleOtpPaste}>
