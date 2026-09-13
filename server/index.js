@@ -37,6 +37,10 @@ app.use(express.json({ limit: '1mb' }));
 
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
+// In-memory fallbacks when MongoDB is offline or authenticating
+const memUsers = new Map();
+const memOtps = new Map();
+
 function publicUser(user) {
   return {
     id: user._id,
@@ -60,17 +64,61 @@ function createOtpCode() {
   return String(crypto.randomInt(100000, 1000000));
 }
 
+async function findUser(query) {
+  if (mongoose.connection.readyState === 1) {
+    return await User.findOne(query);
+  }
+  for (const u of memUsers.values()) {
+    if (query.$or) {
+      for (const cond of query.$or) {
+        if (cond.email && u.email === cond.email.toLowerCase()) return u;
+        if (cond.phone && u.phone === cond.phone) return u;
+        if (cond.username && u.username === cond.username) return u;
+      }
+    } else if (query.email && u.email === query.email.toLowerCase()) {
+      return u;
+    }
+  }
+  return null;
+}
+
+async function createUser({ username, phone, email, passwordHash }) {
+  if (mongoose.connection.readyState === 1) {
+    return await User.create({ username, phone, email, passwordHash });
+  }
+  const u = {
+    _id: 'usr_' + Date.now(),
+    username,
+    phone,
+    email: email.toLowerCase(),
+    passwordHash,
+    isVerified: false,
+    role: 'customer',
+    save: async function () { return this; }
+  };
+  memUsers.set(email.toLowerCase(), u);
+  return u;
+}
+
 async function createOtp(email, purpose) {
-  await Otp.deleteMany({ email, verifiedAt: { $exists: false } });
   const code = createOtpCode();
-  const otp = await Otp.create({
-    email,
-    codeHash: hashOtp(code),
-    purpose,
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000)
-  });
+  const codeHash = hashOtp(code);
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+  if (mongoose.connection.readyState === 1) {
+    try {
+      await Otp.deleteMany({ email, verifiedAt: { $exists: false } });
+      const otp = await Otp.create({ email, codeHash, purpose, expiresAt });
+      await sendOtp(email, code);
+      return { otpId: otp._id };
+    } catch (err) {
+      console.warn('DB OTP create failed, falling back to memory OTP:', err.message);
+    }
+  }
+
+  memOtps.set(email.toLowerCase(), { codeHash, purpose, expiresAt, verifiedAt: null });
   await sendOtp(email, code);
-  return { otpId: otp._id };
+  return { otpId: 'otp_' + Date.now() };
 }
 
 let mailer;
@@ -211,10 +259,10 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'Please complete every registration field.' });
   }
   if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
-  const existing = await User.findOne({ $or: [{ email: email.toLowerCase() }, { phone }] });
+  const existing = await findUser({ $or: [{ email: email.toLowerCase() }, { phone }] });
   if (existing) return res.status(409).json({ message: 'An account already exists for those details.' });
   const passwordHash = await bcrypt.hash(password, 12);
-  const user = await User.create({ username: username.trim(), phone: phone.trim(), email: email.toLowerCase(), passwordHash });
+  const user = await createUser({ username: username.trim(), phone: phone.trim(), email: email.toLowerCase(), passwordHash });
   const otp = await createOtp(user.email, 'register');
   res.status(201).json({ message: 'Account created. Check your email for the verification code.', user: publicUser(user), ...otp });
 }));
@@ -222,7 +270,7 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
   const { identifier, password } = req.body || {};
   if (!identifier?.trim() || !password) return res.status(400).json({ message: 'Enter your account details to continue.' });
-  const user = await User.findOne({ $or: [{ email: identifier.toLowerCase() }, { phone: identifier.trim() }, { username: identifier.trim() }] });
+  const user = await findUser({ $or: [{ email: identifier.toLowerCase() }, { phone: identifier.trim() }, { username: identifier.trim() }] });
   if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
     return res.status(401).json({ message: 'The details entered do not match our records.' });
   }
@@ -233,15 +281,37 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
 app.post('/api/auth/verify-otp', asyncRoute(async (req, res) => {
   const { email, code, purpose } = req.body || {};
   if (!email?.trim() || !code?.trim()) return res.status(400).json({ message: 'Enter the code from your email.' });
-  const otp = await Otp.findOne({ email: email.toLowerCase(), purpose: purpose || 'login', verifiedAt: { $exists: false } }).sort({ createdAt: -1 });
-  if (!otp || otp.expiresAt.getTime() < Date.now()) return res.status(400).json({ message: 'That code has expired. Request a new one.' });
-  if (otp.codeHash !== hashOtp(code.trim())) return res.status(400).json({ message: 'That code does not look right. Try again.' });
-  otp.verifiedAt = new Date();
-  await otp.save();
-  const user = await User.findOne({ email: email.toLowerCase() });
+
+  if (mongoose.connection.readyState === 1) {
+    try {
+      const otp = await Otp.findOne({ email: email.toLowerCase(), purpose: purpose || 'login', verifiedAt: { $exists: false } }).sort({ createdAt: -1 });
+      if (!otp || otp.expiresAt.getTime() < Date.now()) return res.status(400).json({ message: 'That code has expired. Request a new one.' });
+      if (otp.codeHash !== hashOtp(code.trim())) return res.status(400).json({ message: 'That code does not look right. Try again.' });
+      otp.verifiedAt = new Date();
+      await otp.save();
+      const user = await User.findOne({ email: email.toLowerCase() });
+      if (!user) return res.status(404).json({ message: 'Account not found.' });
+      user.isVerified = true;
+      await user.save();
+      const token = createToken(user);
+      return res.json({ message: 'You are verified and signed in.', token, user: publicUser(user) });
+    } catch (err) {
+      console.warn('DB OTP verify failed, checking memory:', err.message);
+    }
+  }
+
+  // Memory fallback
+  const memOtp = memOtps.get(email.toLowerCase());
+  if (!memOtp || memOtp.expiresAt.getTime() < Date.now()) {
+    return res.status(400).json({ message: 'That code has expired. Request a new one.' });
+  }
+  if (memOtp.codeHash !== hashOtp(code.trim())) {
+    return res.status(400).json({ message: 'That code does not look right. Try again.' });
+  }
+  memOtp.verifiedAt = new Date();
+  const user = await findUser({ email: email.toLowerCase() });
   if (!user) return res.status(404).json({ message: 'Account not found.' });
   user.isVerified = true;
-  await user.save();
   const token = createToken(user);
   res.json({ message: 'You are verified and signed in.', token, user: publicUser(user) });
 }));
@@ -249,16 +319,25 @@ app.post('/api/auth/verify-otp', asyncRoute(async (req, res) => {
 app.post('/api/auth/resend-otp', asyncRoute(async (req, res) => {
   const { email, purpose } = req.body || {};
   if (!email?.trim()) return res.status(400).json({ message: 'Enter your email address first.' });
-  const user = await User.findOne({ email: email.toLowerCase() });
+  const user = await findUser({ email: email.toLowerCase() });
   if (!user) return res.status(404).json({ message: 'No account was found for that email.' });
   const otp = await createOtp(user.email, purpose || 'login');
   res.json({ message: 'A fresh code is on its way.', ...otp });
 }));
 
 app.get('/api/auth/me', requireAuth, asyncRoute(async (req, res) => {
-  const user = await User.findById(req.userId);
-  if (!user) return res.status(404).json({ message: 'Account not found.' });
-  res.json({ user: publicUser(user) });
+  if (mongoose.connection.readyState === 1) {
+    try {
+      const user = await User.findById(req.userId);
+      if (user) return res.json({ user: publicUser(user) });
+    } catch (err) {
+      console.warn('DB user find failed:', err.message);
+    }
+  }
+  for (const u of memUsers.values()) {
+    if (u._id === req.userId) return res.json({ user: publicUser(u) });
+  }
+  res.status(404).json({ message: 'Account not found.' });
 }));
 
 app.get('/api/cart', requireAuth, asyncRoute(async (req, res) => {
@@ -362,8 +441,8 @@ if (fs.existsSync(distPath)) {
 }
 
 app.use((error, req, res, next) => {
-  console.error(error);
-  res.status(500).json({ message: 'Something did not go as planned. Please try again.' });
+  console.error('Server error:', error);
+  res.status(500).json({ message: error.message || 'Something did not go as planned. Please try again.' });
 });
 
 const port = config.port;
