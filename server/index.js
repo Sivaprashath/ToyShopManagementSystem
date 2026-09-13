@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
+import dns from 'dns';
 import { config } from './config.js';
 import { connectDatabase } from './db.js';
 import Product from './models/Product.js';
@@ -16,6 +17,13 @@ import { products } from './seed.js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+
+// Enforce IPv4 first to prevent IPv6 hangs on cloud platforms (Render/AWS)
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {
+  // node version compatibility
+}
 
 await connectDatabase();
 
@@ -145,13 +153,14 @@ function getMailer() {
     host: config.smtpHost || 'smtp.gmail.com',
     port: Number(config.smtpPort) || 465,
     secure: Number(config.smtpPort) === 465,
+    family: 4, // Force IPv4 routing to bypass cloud IPv6 blocking
     auth: {
       user: config.smtpUser,
       pass: config.smtpPass
     },
-    connectionTimeout: 4000,
-    greetingTimeout: 4000,
-    socketTimeout: 5000
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000
   });
   return mailer;
 }
