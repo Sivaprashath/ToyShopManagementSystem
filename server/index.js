@@ -10,6 +10,7 @@ import Product from './models/Product.js';
 import User from './models/User.js';
 import Otp from './models/Otp.js';
 import Cart from './models/Cart.js';
+import mongoose from 'mongoose';
 import Order from './models/Order.js';
 import { products } from './seed.js';
 import path from 'path';
@@ -19,13 +20,15 @@ import { fileURLToPath } from 'url';
 await connectDatabase();
 
 try {
-  const existingCount = await Product.countDocuments();
-  if (existingCount === 0) {
-    await Product.insertMany(products);
-    console.log(`Auto-seeded ${products.length} products`);
+  if (mongoose.connection.readyState === 1) {
+    const existingCount = await Product.countDocuments();
+    if (existingCount === 0) {
+      await Product.insertMany(products);
+      console.log(`Auto-seeded ${products.length} products`);
+    }
   }
 } catch (err) {
-  console.warn('Auto-seeding check error:', err.message);
+  console.warn('Auto-seeding check skipped:', err.message);
 }
 
 const app = express();
@@ -163,21 +166,41 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/products', asyncRoute(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
-  const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 10));
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 12));
   const category = String(req.query.category || '').trim();
   const search = String(req.query.search || '').trim();
-  const query = {};
-  if (category && category !== 'All toys') query.category = category;
-  if (search) query.name = { $regex: search, $options: 'i' };
-  const [products, total] = await Promise.all([
-    Product.find(query).sort({ createdAt: 1 }).skip((page - 1) * limit).limit(limit),
-    Product.countDocuments(query)
-  ]);
-  res.json({ products, page, totalPages: Math.ceil(total / limit), total });
+
+  if (mongoose.connection.readyState === 1) {
+    const query = {};
+    if (category && category !== 'All toys') query.category = category;
+    if (search) query.name = { $regex: search, $options: 'i' };
+    const [dbProducts, total] = await Promise.all([
+      Product.find(query).sort({ createdAt: 1 }).skip((page - 1) * limit).limit(limit),
+      Product.countDocuments(query)
+    ]);
+    return res.json({ products: dbProducts, page, totalPages: Math.ceil(total / limit), total });
+  }
+
+  // Fallback in-memory catalog
+  let filtered = [...products];
+  if (category && category !== 'All toys') {
+    filtered = filtered.filter((p) => p.category?.toLowerCase() === category.toLowerCase());
+  }
+  if (search) {
+    filtered = filtered.filter((p) => p.name?.toLowerCase().includes(search.toLowerCase()));
+  }
+  const total = filtered.length;
+  const paginated = filtered.slice((page - 1) * limit, page * limit);
+  res.json({ products: paginated, page, totalPages: Math.ceil(total / limit), total });
 }));
 
 app.get('/api/products/:slug', asyncRoute(async (req, res) => {
-  const product = await Product.findOne({ slug: req.params.slug });
+  if (mongoose.connection.readyState === 1) {
+    const product = await Product.findOne({ slug: req.params.slug });
+    if (!product) return res.status(404).json({ message: 'That toy could not be found.' });
+    return res.json({ product });
+  }
+  const product = products.find((p) => p.slug === req.params.slug);
   if (!product) return res.status(404).json({ message: 'That toy could not be found.' });
   res.json({ product });
 }));
