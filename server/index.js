@@ -11,8 +11,22 @@ import User from './models/User.js';
 import Otp from './models/Otp.js';
 import Cart from './models/Cart.js';
 import Order from './models/Order.js';
+import { products } from './seed.js';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 
 await connectDatabase();
+
+try {
+  const existingCount = await Product.countDocuments();
+  if (existingCount === 0) {
+    await Product.insertMany(products);
+    console.log(`Auto-seeded ${products.length} products`);
+  }
+} catch (err) {
+  console.warn('Auto-seeding check error:', err.message);
+}
 
 const app = express();
 app.use(cors());
@@ -310,6 +324,19 @@ app.post('/api/orders/:id/payment/verify', requireAuth, asyncRoute(async (req, r
   await order.save();
   res.json({ order, message: 'Payment received. Your toys are being prepared!' });
 }));
+
+// Serve React production build when available (Render / Railway / Production)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.resolve(__dirname, '../dist');
+
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
 
 app.use((error, req, res, next) => {
   console.error(error);
